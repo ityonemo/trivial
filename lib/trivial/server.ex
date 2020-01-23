@@ -1,10 +1,77 @@
 defmodule Trivial.Server do
+
+  @moduledoc """
+  A genserver which handles data packet transfers between the TFTP service
+  and hungry clients.  By being spawned off of `Trivial.Daemon` after accept,
+  it allows transactions to be concurrent and asynchronous.
+
+  Generally, you should not be initiating from this module, except possibly
+  for testing puroposes.
+
+  This module also serves as a behaviour module defining the API that you
+  should use to service TFTP transactions.
+
+  ## Example
+
+  The following example shows how to set up a TFTP module which can
+  transmit both templated and file data.  Note that in general, you should
+  not use stateful reading techinques in the `read/5` callback since UDP
+  has no delivery guarantees and the client may re-request a data block,
+  meaning that your data transmission may be nonlinear.
+
+  ```
+  defmodule MyTftpModule do
+    @behaviour Trivial.Server
+
+    @impl true
+    # forbids transactions from the evil ip address 42.42.42.42
+    def init(_, {42, 42, 42, 42}, _), do: {:error, :eacces}
+    # forbids transactions to unwanted files
+    def init("secret.txt", _client, _), do: {:error, :eacces}
+
+    # set up a templated transaction
+    def init("/templated", _client, data) do
+      str = "template for \#{inet.ntoa client}"
+      size = :erlang.size(str)
+      {:ok, {str, size}}
+    end
+
+    # set up file transaction
+    def init(file, _client, data) do
+      bin = File.read!(file)
+      size = :erlang.size(bin)
+      {:ok, {bin, size}}
+    end
+
+    @impl true
+    def read(_request, pos, len, _client, data = {str, size}) when pos > size do
+      :done
+    end
+    def read(_request, pos, len, _client, data = {str, size}) pos + len > size do
+      {:ok, :erlang.binary_part(str, pos, size - pos), data}
+    end
+    def read(_request, pos, len, _client, data = {str, size}) do
+      {:ok, :erlang.binary_part(str, pos, len), data}
+    end
+
+    @impl true
+    def tsize(_request, _client, data = {_, size}) do
+      {:ok, size, data}
+    end
+  end
+  ```
+  """
+
   use GenServer
 
   alias Trivial.{Conn, Daemon, Packet}
 
   require Logger
 
+  @spec start_link(Conn.t) :: GenServer.on_start
+  @doc """
+  starts up a TFTP server that wraps a single set of connection details.
+  """
   def start_link(conn) do
     GenServer.start_link(__MODULE__, conn)
   end
@@ -49,6 +116,8 @@ defmodule Trivial.Server do
          {:ok, data} <- module.init(conn.filename, conn.client_ip, conn.data) do
       {:noreply, %{conn | data: data}, {:continue, :first_data}}
     else
+      {:error, reason} ->
+        {:stop, reason, conn}
       _ -> {:stop, :error, conn}
     end
   end
@@ -100,10 +169,14 @@ defmodule Trivial.Server do
   #############################################################################
   ## API
 
-  @spec port(GenServer.server) :: non_neg_integer
+  @spec port(GenServer.server) :: :inet.port_number
+  @doc """
+  used to retrieve the open port that is being used for the transaction.  This
+  is synonomyous to `TID` in RFC 1350.
+  """
   def port(svr), do: GenServer.call(svr, :port)
-  @spec port_impl(Conn.t) :: {:reply, non_neg_integer, Conn.t}
-  def port_impl(conn), do: {:reply, conn.srv_port, conn}
+  @spec port_impl(Conn.t) :: {:reply, :inet.port_number, Conn.t}
+  defp port_impl(conn), do: {:reply, conn.srv_port, conn}
 
   @ack 4
   @err 5
@@ -133,15 +206,47 @@ defmodule Trivial.Server do
   @impl true
   def handle_call(:port, _from, conn), do: port_impl(conn)
 
-  # callbacks.  These callback definitions help you create a
-  # module which implements key features of TFTP.
-  @callback init(Path.t, :inet.address, data) :: {:ok, data} when data: term
+  #############################################################################
+  ## Callbacks
 
-  @callback read(Path.t, non_neg_integer, non_neg_integer, :inet.address, data)
-    :: {:ok, binary, data}
-    | :done
-    | {:error, type::atom, String.t, data} when data: term
+  @doc """
+  called after the TFTP transaction request has been made to to the server,
+  but before any further messages have been passed between the client and
+  the server.  Most stateful setup and teardown should occur here.
+  """
+  @callback init(
+    request :: Path.t,
+    client :: :inet.address,
+    data) :: {:ok, data} | :error | {:error, Packet.error_codes} when data: term
 
-  @callback tsize(Path.t, :inet.address, data)
-    :: {:ok, non_neg_integer, data} | {:error, reason::atom, String.t, data} when data: term
+  @doc """
+  called when the TFTP server needs to deliver another data packet to the
+  client.
+  """
+  @callback read(
+    request::Path.t,
+    position :: non_neg_integer,
+    size :: non_neg_integer,
+    client :: :inet.address,
+    data) ::
+      {:ok, binary, data}
+      | :done
+      | {:error, type::atom, String.t, data}
+      when data: term
+
+
+  @doc """
+  called if the TFTP client has requested to know the size of the content
+  ahead of time.
+
+  Your `read/5` calls should respect this value as a maximum size limit
+  to your content payload
+  """
+  @callback tsize(
+    request::Path.t,
+    client:: :inet.address,
+    data) ::
+      {:ok, non_neg_integer, data}
+      | {:error, reason::atom, String.t, data}
+      when data: term
 end

@@ -1,27 +1,60 @@
 defmodule Trivial.Packet do
 
+  @moduledoc """
+  Code for converting structured erlang data into a udp packet
+  which is then sent over the udp connection in a `Trivial.Conn`
+  struct.
+  """
+
   alias Trivial.Conn
+
+  @errorcodes %{
+    error:     0,
+    enoent:    1,
+    eacces:    2,
+    enotsup:   4,
+    einval:    5,
+    enouser:   7
+  }
+
+  @typedoc """
+  POSIX atom terms to describe transaction errors.
+
+  The following definitions are from
+  [RFC 1350](https://tools.ietf.org/html/rfc1350) Appendix I (p. 9)
+
+  ```text
+  atom        value     meaning
+
+  :error      0         Not defined, see error message (if any).
+  :enoent     1         File not found.
+  :eacces     2         Access violation.
+  -           3         Disk full or allocation exceeded.
+  :enotsup    4         Illegal TFTP operation.
+  :eninval    5         Unknown transfer ID.
+  -           6         File already exists.
+  :enouser    7         No such user.
+  ```
+  """
 
   @type error_codes ::
     :error | :enoent | :eacces| :enotsup| :einval| :enouser
 
+  @typedoc "structured data representing an error response"
   @type error_def :: {:error, error_codes, iodata}
-
-  @type packet_def ::
-    {:data, block_id::non_neg_integer, iodata} |
-    error_def | :oack
-
-  @typep miniconn :: %{
-    socket:      :gen_udp.socket,
-    client_ip:   :inets.address,
-    client_port: non_neg_integer
-  }
+  @typedoc "structured data representing a data response"
+  @type data_def :: {:data, block_id::non_neg_integer, iodata}
+  @typedoc "structured data for connection responses"
+  @type packet_def :: data_def | error_def | :oack
 
   #############################################################################
   # API
 
   @spec send(Conn.t, packet_def) :: any
-  @spec send(miniconn, error_def) :: any
+  @doc """
+  converts a structured erlang term and sends the corresponding TFTP packet
+  over an open udp socket
+  """
   def send(conn, {:data, block, data}) do
     do_send_data(conn, block, data)
   end
@@ -55,24 +88,6 @@ defmodule Trivial.Packet do
       conn.client_ip,
       conn.client_port, [@data, <<block::16>>, data])
   end
-
-  # 0         Not defined, see error message (if any).
-  # 1         File not found.
-  # 2         Access violation.
-  # 3         Disk full or allocation exceeded.
-  # 4         Illegal TFTP operation.
-  # 5         Unknown transfer ID.
-  # 6         File already exists.
-  # 7         No such user.
-
-  @errorcodes %{
-    error:     0,
-    enoent:    1,
-    eacces:    2,
-    enotsup:   4,
-    einval:    5,
-    enouser:   7
-  }
 
   @error <<0, 5>>
   defp do_send_error(conn, error, errormsg) do

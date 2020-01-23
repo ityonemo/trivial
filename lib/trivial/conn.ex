@@ -1,6 +1,6 @@
 defmodule Trivial.Conn do
   @moduledoc """
-  struct for tftp connection negotiation.
+  The struct for holding stateful TFTP connection information.
 
   From [rfc1350](https://tools.ietf.org/html/rfc1350) Section 2:
 
@@ -37,6 +37,34 @@ defmodule Trivial.Conn do
     :client_ip, :client_port, :daemon, :srv_pid, :srv_port, :ref, :socket,
     :module, :data, :blksize, :timeout, :tsize]
 
+  @typedoc """
+  A struct which contains all relevant settings for a TFTP transaction.
+
+  Connection information (server):
+
+  - `daemon`: erlang pid for the daemon which accepted the initial request.
+  - `srv_pid`: erlang pid for the server handling downstream requests.
+  - `srv_port`: serverside udp port.  also known as the `TID` in rfc docs.
+  - `socket`: erlang udp socket for the server
+
+  Connection information (client):
+
+  - `client_ip`: ip address of the client.
+  - `client_port`: clientside udp port
+
+  Library values:
+
+  - `filename`: the request file name being served by this conn.
+  - `module`: the module implementing `Trivial.Server` callbacks.
+  - `data`: stateful data presented to the `Trivial.Server` behaviour module
+
+  TFTP options:
+
+  - `blksize`: size to be transferred in each udp block.
+  - `tsize`: `true` between initial request and when the client
+    module populates the tsize value, after which it should be an integer.
+  - `timeout`: currently unimplemented.
+  """
   @type t :: %__MODULE__{
     mode:        :read | :write,
     filename:    String.t,
@@ -51,7 +79,7 @@ defmodule Trivial.Conn do
     data:        term,
     blksize:     non_neg_integer | nil,
     timeout:     non_neg_integer | nil,
-    tsize:       true | nil
+    tsize:       true | non_neg_integer | nil
   }
 
   require Logger
@@ -59,11 +87,11 @@ defmodule Trivial.Conn do
   @rrq <<1::16>>
   @wrq <<2::16>>
 
-  @spec from_request(tuple, {module, term}) :: {:ok, t} | {:error, :eacces}
+  @spec from_request(packet::tuple, initializer::{module, term}) :: {:ok, t} | {:error, :eacces}
   @doc """
-  converts an erlang UDP struct to a request struct.
+  converts an erlang UDP packet tuple to a request struct.
 
-  From rfc1350 (p 8):
+  From [rfc1350](https://tools.ietf.org/html/rfc1350) (p 8):
 
   ```
             2 bytes    string   1 byte     string   1 byte
@@ -72,7 +100,8 @@ defmodule Trivial.Conn do
    WRQ    -----------------------------------------------
   ```
 
-  this library will only accept read requests.
+  This library will only accept `read` requests.  A `write`
+  request will emit an access error.
   """
   def from_request({:udp, _port, client_ip, client_port, @rrq <> xmit_binary}, {module, data}) do
     # pick a random transmission id in the 16-bit range.
@@ -98,7 +127,10 @@ defmodule Trivial.Conn do
     {:error, :eacces}
   end
 
+  @spec parse_options(t, [String.t]) :: t
   @doc """
+  Used to populate the `t:t/0` struct from a list of strings.  In the
+  tftp packet, this was a zero-delimited data structure.
 
   Note that from [rfc 2347](https://tools.ietf.org/html/rfc2348) (p 2):
 
@@ -115,9 +147,9 @@ defmodule Trivial.Conn do
    >-------+---+---~~---+---+
   ```
 
-  - blocksize option is defined in [rfc 2348](https://tools.ietf.org/html/rfc2348)
-  - timeout option is defined in [rfc 2349](https://tools.ietf.org/html/rfc2348)
-  - tsize option is defined in [rfc 2349](https://tools.ietf.org/html/rfc2348)
+  - `blocksize` option is defined in [rfc 2348](https://tools.ietf.org/html/rfc2348)
+  - `timeout` option is defined in [rfc 2349](https://tools.ietf.org/html/rfc2348)
+  - `tsize` option is defined in [rfc 2349](https://tools.ietf.org/html/rfc2348)
 
   """
   def parse_options(conn, []), do: conn

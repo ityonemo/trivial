@@ -1,9 +1,27 @@
 defmodule Trivial.Daemon do
-
   @moduledoc """
   UDP Daemon for the TFTP protocol.  Listens on a port for "accept"-style UDP
   connections, then spawns a server to handle the continued processing of the
   results.
+
+  You should use this module directly to start up a TFTP service if you don't
+  necessarily want a supervision tree, for example, in tests.  The daemon and
+  server processes, will still be linked, so an error will bring down the
+  entire Daemon instance.
+
+  ## Example
+
+  The following code starts up a TFTP service on a free udp port and
+  retrieves the udp port so that you can run tests against the functionality
+  of MyModule:
+
+  ```
+  {:ok, daemon} = Trivial.Daemon.start_link(MyModule, initial_value, port: 0)
+  dest_port = Trivial.Daemon.port(daemon)
+  ```
+
+  If you are testing components with `Mox`, be sure to link the
+  daemon process to your test process with specific allowances.
   """
 
   defstruct [:port,          # UDP Port to listen to
@@ -12,19 +30,42 @@ defmodule Trivial.Daemon do
              :supervisor,    # parent supervisor identity.
              servers: %{}]   # child servers and who they connect to
 
+  @typep t :: %{
+    port:       :inet.port_number,
+    socket:     :gen_udp.socket,
+    init:       term,
+    supervisor: pid,
+    servers:    %{optional(:inet.address) => Conn.t}
+  }
+
   use GenServer
 
   require Logger
-
   alias Trivial.{Conn, Packet, Server}
 
   #############################################################################
   ## LAUNCH BOOTSTRAPPING BOILERPLATE
 
+  @spec start_link({module, term, keyword}) :: GenServer.on_start
+  @doc false
+  # internal API for easy calling when building supervision trees.
   def start_link({server_mod, server_init, opts}) do
     start_link(server_mod, server_init, opts)
   end
 
+  @spec start_link(module, term, keyword) :: GenServer.on_start
+  @doc """
+  starts a daemon.
+
+  ## Options:
+  - `port`: UDP port to open for transactions.  Note that a value of 0 will
+    select a random, available port.  You may then discover this port by calling
+    `port/1`. On some systems, you may be restricted to ports above 1024; as the
+    default TFTP port is 69, an empty value will not automatically be usable in
+    the standard fashion.  See `Trivial` for deployment strategies.
+
+    *Defaults to UDP port 6969*
+  """
   def start_link(server_mod, server_init, opts) do
     gen_server_opts = opts
     |> Keyword.take([:name])
@@ -35,6 +76,7 @@ defmodule Trivial.Daemon do
   end
 
   @impl true
+  @spec init(keyword) :: {:ok, t} | {:stop, any}
   def init(opts) do
     port = opts[:port] || 6969
     extra_opts = Keyword.take(opts, [:bind_to_device])
@@ -59,19 +101,27 @@ defmodule Trivial.Daemon do
   defp port_impl(state), do: {:reply, state.port, state}
 
   @spec server_supervisor(GenServer.server) :: pid
+  @doc false
+  # entirely an internal convenience call.  Mostly used by daemon
+  # to be able to hook child servers into the supervision tree, under
+  # the dynamic supervisor.
   def server_supervisor(daemon) when is_atom(daemon) or is_pid(daemon) do
     GenServer.call(daemon, :server_supervisor)
   end
-  # for internal calls
+  # for calls COMING FROM INSIDE THE BUILDING
   def server_supervisor(%__MODULE__{supervisor: supervisor}) do
     # this should punt to asking Trivial.
     Trivial.server_supervisor(supervisor)
   end
+  # punt to a local call.  (the call trace here is a bit
+  # spaghetti-ish, so be careful!)
   defp server_supervisor_impl(state) do
     {:reply, server_supervisor(state), state}
   end
 
   @spec register(Conn.t) :: :ok
+  @doc false
+  # used by a child server to inform the daemon that it exists.
   def register(conn) do
     GenServer.call(conn.daemon, {:register, {self(), conn}})
   end
@@ -107,7 +157,7 @@ defmodule Trivial.Daemon do
 
   #############################################################################
   ## cleanup is responsible for reopening the udp port of the child and
-  ## sending an error signal.
+  ## sending an error signal back to the waiting client.
 
   defp cleanup_impl({:DOWN, _, :process, pid, :normal}, state) do
     # if it ended normally we don't have to send anything back to the client,
@@ -136,7 +186,7 @@ defmodule Trivial.Daemon do
   def handle_info(message = {:DOWN, _, :process, _, _}, state) do
     cleanup_impl(message, state)
   end
-  def handle_info(msg, state) do
+  def handle_info(_msg, state) do
     {:noreply, state}
   end
 
