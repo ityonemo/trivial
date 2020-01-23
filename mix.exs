@@ -13,7 +13,7 @@ defmodule Trivial.MixProject do
       preferred_cli_env: [coveralls: :test, "coveralls.detail": :test, "coveralls.post": :test, "coveralls.html": :test],
       source_url: "https://github.com/ityonemo/trivial",
       package: package(),
-      description: "A Read-only TFTP Service for Elixir"
+      description: "A Read-only TFTP Service for Elixir",
       docs: [main: "Trivial", extras: ["README.md"]]
     ]
   end
